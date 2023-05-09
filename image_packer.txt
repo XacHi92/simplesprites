@@ -1,0 +1,77 @@
+--@name Image packer
+--@author Gachi-Purka
+--@shared
+
+if player() ~= owner() then return end
+
+if CLIENT then
+    
+    -- Packs all files in folder PATH and packs it
+    -- Govnocode as it is ;D
+    
+    -- For urls
+    local urlsUsed = false
+    local urls = {
+        
+    }
+    
+    -- For files
+    local countOfImages = 0
+    local PATH = "sprites/packBox" -- relaitive to data/sf_filedata
+    local SAVENAME = "packed_sprites.txt"
+    
+    -- For both mods
+    local encoding = false
+    
+    local i = 0
+    local out = {}
+    local files, dirs = file.find(PATH .. "/*")
+    
+    
+    hook.add("think", "a", function()
+        while http.canRequest() do
+            i = i + 1
+
+            local url = urls[i]
+            local imageEnd = string.find(url, ".", -6, true)
+            imageEnd = string.sub(url, imageEnd + 1)
+            
+            local name = files[i]
+            local saveName = string.replace(name, "." .. imageEnd, "")
+            
+            if not urlsUsed then
+                http.get(url, function(data)
+                    local f = "data:image/".. imageEnd .. ";base64," .. http.base64Encode(data)
+                    out[saveName] = f
+                end, function() print("Error!") end)
+            else
+                local f = file.read(PATH .. "/" .. name)
+                ff = "data:image/".. imageEnd .. ";base64," .. http.base64Encode(f)
+                out[saveName] = ff
+                
+                if i == countOfImages then
+                    timer.create("aboba", 1, 1, function()
+                        local data = json.encode(out)
+                        if encoding then data = bit.compress(data) end
+                        file.write(SAVENAME, data)
+                        print("Saved " .. table.count(out) .. " sprites")   
+                    end)
+                    hook.remove("think", "a")
+                    break
+                end
+                
+            end
+        end
+    end)
+    
+    
+
+else
+    local screen = prop.createComponent(
+        chip():getPos() + Vector(0, 0, 60), 
+        (owner():getPos() - chip():getPos()):getAngle() * Angle(0, 1, 0) + Angle(90, 0, 0), 
+        "starfall_screen", "models/hunter/plates/plate2x2.mdl", 1
+    ) 
+    screen:linkComponent(chip())
+    screen:setCollisionGroup(1)
+end

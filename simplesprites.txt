@@ -1,0 +1,616 @@
+--@name simplesprites
+
+--[[================== DOCUMENTATION ======================
+
+    Library for work with sprites in starfall :D
+    
+    Made by: GacHi-Purka
+    Last update: 09.05.23
+
+
+    List of commands:
+    
+    Manual sprite creation =====================================
+
+        sprite.createSpriteSheet(number sheetId, number size)
+            -- Creates a sprite sheet with specific size
+        
+        
+        sprite.addSprite(number sheetId, string name, string image_url)
+            -- Adds an image to sprite sheet
+            -- Also supports local files from "sf_filedata" and "sf_filedatatemp" folders
+            -- For load from temp folder, you need add "temp/" in beginning of file path
+            -- Supports loading sprites by data-url encoded by base64. Example: data:image/png;base64,BASE64ENCODEDIMAGEDATA
+        
+        
+        sprite.addAnimatedSprite(string name, number fps, table anim)
+            -- Adds animated sprite, created from some simple images
+            -- Anim table should look like {"sprite1", "sprite2", "sprite3", ...}
+        
+        
+    Automatic sprite creation ====================================================
+        
+        sprite.importFromFile(number size, string path, bool compressed)
+            -- Imports sprites form specific file, which can be compressed using bit.compress()
+            -- compressed = true by defaults 
+            
+            
+        sprite.importFromURL(number size, string url, bool compressed)
+            -- Works some as importFromFile, but uses url to file instead of local path
+            
+            
+        sprite.addSpritesheet(number id, string url, numebr size, number imagesCount, number offset, string basename)
+            -- Imports a whole spritesheet as one image. All sprites will be named like "basename N", where N is a number of sprite
+            -- You can use offset to ajust number of sprites, if you import more than one spritesheet
+            -- basename = "sprite " by defaults
+            -- TIP: If your sprites not 'cubic' at first, it will be when you load a spritesheet. 
+                    If your sprites don't have same X and Y size, i recomend you import it some other way
+                    
+                    
+        Sprite file is a json encoded table with base64 encoded images, and names as keys in table
+        if you want to compress it, just use bit.compress() on whole encoded file
+        
+        Example:
+        {"frame 1":"data:image/png;base64,somedata", "frame 2":"somedata", "frame 3":"somedata", "frame 4":"somedata", ...}
+        
+        
+    Info ====================================================
+    
+        sprite.getSprite(string name)
+            -- Returns a table with sprite info
+        
+    
+        sprite.isLoading()
+            -- Returns bool value of sprite loading state, if loading ends it return false
+        
+        
+    Properties ====================================================
+        
+        sprite.setErrorOnOverflow(number sheetId, bool toggle)
+            -- By defaults if you try to load more images that sprite sheet can take it throws an error
+            -- Using this command you can turn ON or OFF this error
+            -- If you turn this OFF and try to overflow sprite sheet, it simply adds it to table, but don't draw it
+    
+    
+        sprite.setCentred(string name, bool toggle)
+            -- Sets sprite in center, like egpBox. Else works like render.drawRect
+        
+        
+        sprite.setAnimCounter(string name, number counter)
+            -- Sets counter of an animated sprite
+            
+            
+        sprite.setProportion(string name, number x, number y)
+            -- You can change size proportion of your sprite
+        
+        
+        sprite.setFPS(string name, number fps)
+            -- Set's FPS of animated sprite
+            
+        sprite.setLooped(string name, bool toggle)
+            -- Enables or disables animation loop
+        
+            
+    Draw ====================================================
+    
+        sprite.draw(string name, number xPos, number yPos, number width, number height)
+            -- Draws a sprite. Nothing else
+            -- Needs to be called in render hook
+        
+        
+        
+    Code example:
+    
+    --@include modules/simplesprites.txt
+    require("modules/simplesprites.txt")
+
+    sprite.createSpriteSheet(1, 256)
+    sprite.addSprite(1, "awesomeSprite", "https://i.imgur.com/pLFLWq1.png")
+    
+    hook.add("render", "a", function()
+        if sprite.isLoading() then return end
+        sprite.draw("awesomeSprite", 128, 128, 256, 256)
+    end)    
+]]
+
+
+
+
+
+
+
+
+
+
+
+local loadMaterial = material.create("UnlitGeneric")
+loadMaterial:setInt("$flags", 2097152)
+
+sprite = {
+    sheets = {},
+    loadQueue = {},
+    drawQueue = {},
+    namesLookup = {},
+    animatedSprites = {},
+    canLoadImage = true,
+    loadedFiles = {}
+}
+
+
+
+function sprite.createSpriteSheet(sheetId, size)
+    render.createRenderTarget("SpriteSheet" .. sheetId)
+    table.insert(sprite.drawQueue, {id = sheetId, key = "init"})
+    sprite.sheets[sheetId] = {
+        id = sheetId,
+        size = size,
+        maxImageCount = (1024 / size) ^ 2,
+        images = {},
+        imageCount = 0,
+        errorOnOverflow = true
+    }
+end
+
+
+
+function sprite.addSprite(sheetId, name, image_url)
+    if not table.hasValue(table.getKeys(sprite.sheets), sheetId) then error("Can't find sprite sheet with ID " .. sheetId .. "!") end
+    
+    local sheet = sprite.sheets[sheetId]
+    if sheet.imageCount + 1 > sheet.maxImageCount then
+        if sheet.errorOnOverflow then
+            error("Sprite sheet (ID:" .. sheet.id .. ") can't fit more than " .. sheet.maxImageCount .. " sprites!")
+        end
+        return 
+    end
+    
+    sheet.imageCount = sheet.imageCount + 1
+    
+    sprite.namesLookup[name] = sheetId
+    
+    table.insert(sprite.loadQueue, {
+        id = sheetId,
+        url = image_url,
+        name = name,
+        size = sprite.sheets[sheetId].size
+    })
+end
+
+
+
+function sprite.getSprite(name)
+    if not table.hasValue(table.getKeys(sprite.namesLookup), name) and not table.hasValue(table.getKeys(sprite.animatedSprites), name) then error("Can't find sprite with name " .. name .. "!") end
+    local id = sprite.namesLookup[name]
+    if id ~= nil then
+        return sprite.sheets[id].images[name]
+    else
+        return sprite.animatedSprites[name]
+    end
+end
+
+
+
+-- anim - table with names of simple images like {"sprite1", "sprite2", "sprite3", ...}
+function sprite.addAnimatedSprite(name, fps, anim)
+    sprite.animatedSprites[name] = {
+        animation = anim,
+        fps = fps,
+        delay = 1 / fps,
+        lastTimeDrawn = 0,
+        counter = 1,
+        centred = true,
+        looped = true
+    }
+end
+
+
+
+function sprite.setErrorOnOverflow(id, val)
+    if table.isEmpty(sprite.sheets[id]) then error("Can't find sprite sheet with ID " .. id .. "!") end
+    sprite.sheets[id].errorOnOverflow = val 
+end
+
+
+
+function sprite.isLoading()
+    return not (table.count(sprite.loadQueue) == 0 and table.count(sprite.drawQueue) == 0)
+end
+
+
+
+function sprite.setAnimCounter(name, c)
+    local spr = sprite.getSprite(name)
+    spr.counter = c
+end
+
+
+
+function sprite.setProportion(name, x, y)
+    local spr = sprite.getSprite(name)
+    spr.propotion = {x, y}
+end
+
+
+
+function sprite.setLooped(name, c)
+    local spr = sprite.getSprite(name)
+    spr.looped = c
+end
+
+
+function sprite.setCentred(name, v)
+    local spr = sprite.getSprite(name)
+    spr.centred = v
+end
+
+
+function sprite.setFPS(name, fps)
+    local spr = sprite.getSprite(name)
+    spr.delay = 1 / fps
+    spr.fps = fps
+end
+
+
+local drawTexturedRectUV = render.drawTexturedRectUV
+local getSprite = sprite.getSprite
+local setRenderTargetTexture = render.setRenderTargetTexture
+
+function sprite.draw(name, x, y, w, h, forceCentred)
+    local spr = getSprite(name)
+    local id = sprite.namesLookup[name]
+    if id ~= nil then
+        -- Simple sprite
+        setRenderTargetTexture("SpriteSheet" .. id)
+        if not spr.centred and not forceCentred then
+            drawTexturedRectUV(x, y, w * spr.propotion[1], h * spr.propotion[2], spr.uv[1], spr.uv[2], spr.uv[3], spr.uv[4])
+        else
+            w = w * spr.propotion[1]
+            h = h * spr.propotion[2]
+            drawTexturedRectUV(x - w * 0.5, y - h * 0.5, w, h, spr.uv[1], spr.uv[2], spr.uv[3], spr.uv[4])
+        end
+    else
+        -- Animated sprite
+        if spr.lastTimeDrawn == 0 then spr.lastTimeDrawn = timer.curtime() end
+        if timer.curtime() - spr.lastTimeDrawn > spr.delay then
+            spr.lastTimeDrawn = timer.curtime()
+            spr.counter = spr.counter + 1
+        end
+        if spr.counter > table.count(spr.animation) then
+            if not spr.looped then return end
+            spr.counter = 1
+        end
+        
+        
+        local nm = spr.animation[spr.counter]
+        sprite.draw(nm, x, y, w, h, spr.centred)
+    end
+    
+    
+end
+
+
+function sprite.importFromFile(size, path, compressed)
+    local f = file.read(path)
+    sprite.loadedFiles[path] = f
+    
+    if compressed == nil or compressed then
+        f = bit.decompress(f)
+    end
+    
+    
+    local tbl = json.decode(f)
+    
+    local count = (1024 / size) ^ 2
+    for i=1, math.ceil(table.count(tbl) / count) do
+        sprite.createSpriteSheet(i, size)
+    end
+
+    local counter = 0
+    for k, v in pairs(tbl) do
+        counter = counter + 1
+        local id = math.ceil(counter / count)
+        
+        sprite.addSprite(id, k, v)
+    end
+end
+
+
+
+function sprite.importFromURL(size, url, compressed)
+    
+    http.get(url, function(f)
+        sprite.loadedFiles[url] = f
+    
+        if compressed == nil or compressed then
+            f = bit.decompress(f)
+        end
+        
+        local tbl = json.decode(f)
+        
+        local count = (1024 / size) ^ 2
+        for i=1, math.ceil(table.count(tbl) / count) do
+            sprite.createSpriteSheet(i, size)
+        end
+    
+        local counter = 0
+        for k, v in pairs(tbl) do
+            counter = counter + 1
+            local id = math.ceil(counter / count)
+            sprite.addSprite(id, k, v)
+        end
+        
+    end, function() error("Failed to import from url!") end)
+end
+
+
+
+function sprite.addSpritesheet(id, url, size, imagesCount, offset, basename)
+    offset = offset or 1
+    basename = basename or "sprite "
+    
+    sprite.createSpriteSheet(id, size)
+    
+    local sheet = sprite.sheets[id]
+    
+    sheet.imageCount = imagesCount
+
+    for i=offset, imagesCount + (offset-1) do
+        local perLine = 1024 / sheet.size
+        local y = math.floor(i / perLine)
+        local x = i - y * perLine
+        
+        local starts = {x * size , y * size}
+        local ends = {(x + 1) * size, (y + 1) * size}
+        local pixel = size / 512 * 0.5 / size
+        
+        sheet.images[basename .. i] = {
+            name = basename .. i,
+            url = "",
+            pos = {x, y},
+            start = starts,
+            ends = ends,
+            centred = false,
+            propotion = {1, 1},
+            uv = {
+                pixel * size * x,
+                pixel * size * y,
+                pixel * size * (x + 1),
+                pixel * size * (y + 1)
+            }
+        }
+        
+        --printTable(sheet.images[basename .. i])
+        sprite.namesLookup[basename .. i] = id
+    end
+
+    local callback = function()
+        table.insert(sprite.drawQueue, {
+            id = id,
+            start = {0, 0},
+            size = 1024,
+            key = "draw"
+        })
+    end
+
+    hook.add("aboba-sprites", "a", function(images) 
+        sprite.buffer[1].images = images 
+        table.remove(sprite.buffer, 1)
+        hook.remove("aboba-sprites", "a")
+    end)
+    
+    loadMaterial:setTextureURL("$basetexture", url, function(mat, url, w, h, func)
+        if func == nil then
+            error("Can't load image! (" .. url .. ")")
+        else
+            func(0, 0, 1024, 1024)
+        end
+    end, callback)
+    
+end
+
+
+
+
+
+
+
+
+
+hook.add("think", "loadImages", function()
+    if not sprite.canLoadImage or table.count(sprite.loadQueue) == 0 or not http.canRequest() then return end
+    sprite.canLoadImage = false
+    
+    
+    local image = sprite.loadQueue[1]
+    local sheet = sprite.sheets[image.id]
+    local callback = function()
+        local image = sprite.loadQueue[1]
+        
+        local perLine = 1024 / sheet.size
+        local y = math.floor(table.count(sheet.images) / perLine)
+        local x = table.count(sheet.images) - y * perLine
+        
+        local starts = {x * sheet.size , y * sheet.size}
+        local ends = {(x + 1) * sheet.size, (y + 1) * sheet.size}
+        local pixel = sheet.size / 512 * 0.5 / sheet.size
+        
+        sheet.images[image.name] = {
+            name = image.name,
+            url = image.url,
+            pos = {x, y},
+            start = starts,
+            ends = ends,
+            centred = false,
+            propotion = {1, 1},
+            uv = {
+                pixel * sheet.size * x,
+                pixel * sheet.size * y,
+                pixel * sheet.size * (x + 1),
+                pixel * sheet.size * (y + 1)
+            }
+        }
+        
+        if image.data ~= nil then
+            sheet.images[image.name].data = image.data
+        end
+        
+--[[
+        if sprite.encoding then
+            sheet.images[image.name].encoded = image.encoded
+        end
+]]
+        
+        
+
+        table.insert(sprite.drawQueue, {
+            id = image.id,
+            name = image.name,
+            start = starts,
+            size = sheet.size,
+            key = "draw"
+        })
+        table.remove(sprite.loadQueue, 1)
+        
+    end
+    
+    local ends = string.sub(image.url, 0, 4)
+    
+    -- Check what type of image we loading, internet or local image
+    if ends == "http" then
+        loadMaterial:setTextureURL("$basetexture", image.url, function(mat, url, w, h, func)
+            local size = sprite.loadQueue[1].size
+            if func == nil then 
+                if string.sub(sprite.loadQueue[1].url, 0, 4) == "data" then 
+                    print("Load failure: " .. sprite.loadQueue[1].name)
+                    table.remove(sprite.loadQueue, 1) 
+                    sprite.canLoadImage = true 
+                    return 
+                end
+                
+                error("Can't load image! (" .. sprite.loadQueue[1].url .. ")")
+            else
+                func(0, 0, size, size)
+            end
+        end, callback)
+        
+    else
+        
+        if ends == "data" then
+            loadMaterial:setTextureURL("$basetexture", image.url, function(mat, url, w, h, func)
+                local size = sprite.loadQueue[1].size
+                if func == nil then
+                    error("Can't load image! (" .. sprite.loadQueue[1].url .. ")")
+                else
+                    func(0, 0, size, size)
+                end
+            end, callback)
+        else
+            -- images from temp folder will be look like "temp/image.png" (sf_filedatatemp folder)
+            local fileRead = file.read
+            local path = image.url
+            if ends == "temp" then
+                fileRead = file.readTemp
+                path = string.sub(path, 6) -- Skips "temp/" part
+            end
+            
+            local imageEnd = string.find(string.reverse(image.url), ".")
+            imageEnd = string.sub(string.reverse(imageEnd), 1)
+            
+            local f = fileRead(path)
+            if f == nil then error("Can't load image: " .. image.url) end
+            f = "data:image/".. imageEnd .. ";base64," .. http.base64Encode(f)
+            
+            sprite.loadQueue[1].data = f
+            loadMaterial:setTextureURL("$basetexture", f, function(mat, url, w, h, func)
+                local size = sprite.loadQueue[1].size
+                if func == nil then
+                    error("Can't load image! (" .. sprite.loadQueue[1].url .. ")")
+                else
+                    func(0, 0, size, size)
+                end
+            end, callback)
+        end
+    end
+    
+--[[
+    else
+        
+        local imageEnd = string.find(string.reverse(image.url), ".")
+        imageEnd = string.sub(string.reverse(imageEnd), 1)
+        
+        http.get(image.url, function(body, _, _, code)
+            local data = http.base64Encode(body)
+            loadMaterial:setTextureURL("$basetexture", "data:image/".. imageEnd .. ";base64," .. data, function(a, b, c, d, func)
+                local size = sprite.loadQueue[1].size
+                
+                if func == nil then 
+                    error("Can't load image! (" .. body .. ")")
+                else
+                    func(0, 0, size, size)
+                    sprite.loadQueue[1].encoded = data
+                end  
+            end, callback)
+        end, function(err) error(err .. " -> " .. image.url) end)
+    end
+]]
+    
+end)
+
+
+
+hook.add("renderoffscreen", "drawImages", function()
+    if table.count(sprite.drawQueue) == 0 then
+        return
+    end
+    
+    local image = sprite.drawQueue[1]
+    render.selectRenderTarget("SpriteSheet" .. image.id)
+    if image.key == "draw" then
+        render.setMaterial(loadMaterial)
+        render.drawTexturedRect(image.start[1], image.start[2], 1024, 1024)
+        sprite.canLoadImage = true
+    elseif image.key == "init" then
+        render.clear(Color(0, 0, 0, 0))
+    end
+    table.remove(sprite.drawQueue, 1)
+end)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
