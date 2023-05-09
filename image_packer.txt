@@ -63,15 +63,4 @@ if CLIENT then
             end
         end
     end)
-    
-    
-
-else
-    local screen = prop.createComponent(
-        chip():getPos() + Vector(0, 0, 60), 
-        (owner():getPos() - chip():getPos()):getAngle() * Angle(0, 1, 0) + Angle(90, 0, 0), 
-        "starfall_screen", "models/hunter/plates/plate2x2.mdl", 1
-    ) 
-    screen:linkComponent(chip())
-    screen:setCollisionGroup(1)
 end
